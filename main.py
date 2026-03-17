@@ -3,7 +3,6 @@ import time
 import json
 import requests
 from dotenv import load_dotenv
-from collections import defaultdict
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -11,18 +10,17 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 ENV_PATH = os.path.join(BASE_DIR, ".env")
 SEEN_FILE = os.path.join(DATA_DIR, "seen_trades.json")
-ROLLING_FILE = os.path.join(DATA_DIR, "rolling_totals.json")
 
 load_dotenv(dotenv_path=ENV_PATH)
 
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+DISCORD_WEBHOOK_URL = os.getenv("https://discord.com/api/webhooks/1483371087525056532/C2wMzedofXgoXkQ9ehDVyTzIgMHpAweLNx8bZNqA_ISo9dwERKqk4SfVQvkdS5Id0Lad")
 
 if not DISCORD_WEBHOOK_URL:
     raise ValueError("Missing DISCORD_WEBHOOK_URL environment variable")
 
 # --- CONFIG ---
 WALLET = "0x6ac5bb06a9eb05641fd5e82640268b92f3ab4b6e"
-THRESHOLD = 2000
+THRESHOLD = 7500
 CHECK_INTERVAL = 30  # seconds
 
 
@@ -44,32 +42,19 @@ def save_seen_trades(seen_trades):
         print(f"Error saving seen trades: {e}")
 
 
-def load_rolling_totals():
-    if os.path.exists(ROLLING_FILE):
-        try:
-            with open(ROLLING_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data
-        except Exception as e:
-            print(f"Error loading rolling totals: {e}")
-    return {}
-
-
-def save_rolling_totals(rolling_totals):
-    try:
-        with open(ROLLING_FILE, "w", encoding="utf-8") as f:
-            json.dump(rolling_totals, f, indent=2)
-    except Exception as e:
-        print(f"Error saving rolling totals: {e}")
-
-
 def get_trade_id(trade):
     for key in ["id", "transactionHash", "txHash"]:
         value = trade.get(key)
         if value:
             return str(value)
 
-    return f"{trade.get('slug','unknown')}|{trade.get('timestamp','')}|{trade.get('usdcSize','')}|{trade.get('title','')}|{trade.get('outcome','')}"
+    return (
+        f"{trade.get('slug', 'unknown')}|"
+        f"{trade.get('timestamp', '')}|"
+        f"{trade.get('usdcSize', '')}|"
+        f"{trade.get('title', '')}|"
+        f"{trade.get('outcome', '')}"
+    )
 
 
 def get_trades():
@@ -114,11 +99,11 @@ def warmup_seen_trades():
     return seen_trades
 
 
-def check_markets(seen_trades, rolling_totals):
+def check_trades(seen_trades):
     trades = get_trades()
     if not trades:
         print("No trades found.")
-        return seen_trades, rolling_totals
+        return seen_trades
 
     new_trades = []
     for trade in trades:
@@ -132,12 +117,9 @@ def check_markets(seen_trades, rolling_totals):
 
     if not new_trades:
         print("No new trade activity.")
-        return seen_trades, rolling_totals
+        return seen_trades
 
     print(f"New trades found: {len(new_trades)}")
-
-    batch_totals = defaultdict(float)
-    batch_info = {}
 
     for trade in new_trades:
         slug = trade.get("slug", "unknown")
@@ -162,62 +144,20 @@ def check_markets(seen_trades, rolling_totals):
         )
         price = float(price or 0)
 
-        key = f"{slug}|||{outcome}"
+        print(f"- {title} | {outcome}: ${usdc:,.2f} at {price:.3f}")
 
-        batch_totals[key] += usdc
-
-        if key not in batch_info:
-            batch_info[key] = {
-                "title": title,
-                "outcome": outcome,
-                "prices": [],
-            }
-
-        batch_info[key]["prices"].append(price)
-
-    print("New activity this cycle:")
-    for key, total in sorted(batch_totals.items(), key=lambda x: x[1], reverse=True):
-        info = batch_info[key]
-        print(f"- {info['title']} | {info['outcome']}: ${total:,.2f}")
-
-    for key, batch_total in batch_totals.items():
-        info = batch_info[key]
-
-        old_total = rolling_totals.get(key, {}).get("total", 0)
-        already_alerted = rolling_totals.get(key, {}).get("alerted", False)
-
-        new_total = old_total + batch_total
-
-        rolling_totals[key] = {
-            "title": info["title"],
-            "outcome": info["outcome"],
-            "total": new_total,
-            "alerted": already_alerted,
-        }
-
-        avg_price = sum(info["prices"]) / len(info["prices"]) if info["prices"] else 0
-
-        print(
-            f"Running total -> {info['title']} | {info['outcome']}: "
-            f"${new_total:,.2f}"
-        )
-
-        if new_total >= THRESHOLD and not already_alerted:
+        if usdc >= THRESHOLD:
             msg = (
-                f"🚨 NEW POLYMARKET ACTIVITY\n"
-                f"Market: {info['title']}\n"
-                f"Bet on: {info['outcome']}\n"
-                f"New this cycle: ${batch_total:,.0f}\n"
-                f"Running total: ${new_total:,.0f}\n"
-                f"Avg price paid this cycle: {avg_price:.3f}"
+                f"🚨 HUGE SINGLE POLYMARKET BET\n"
+                f"Market: {title}\n"
+                f"Bet on: {outcome}\n"
+                f"Trade size: ${usdc:,.0f}\n"
+                f"Price paid: {price:.3f}"
             )
             send_discord(msg)
-            rolling_totals[key]["alerted"] = True
 
     save_seen_trades(seen_trades)
-    save_rolling_totals(rolling_totals)
-
-    return seen_trades, rolling_totals
+    return seen_trades
 
 
 def main():
@@ -228,13 +168,11 @@ def main():
         seen_trades = load_seen_trades()
         print(f"Loaded {len(seen_trades)} previously seen trades.")
 
-    rolling_totals = load_rolling_totals()
-    print(f"Loaded {len(rolling_totals)} rolling market/outcome totals.")
     print("Monitoring started...")
 
     while True:
         print(f"Checking... ({time.strftime('%H:%M:%S')})")
-        seen_trades, rolling_totals = check_markets(seen_trades, rolling_totals)
+        seen_trades = check_trades(seen_trades)
         time.sleep(CHECK_INTERVAL)
 
 
