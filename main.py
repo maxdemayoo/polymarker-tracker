@@ -3,6 +3,7 @@ import time
 import json
 import requests
 from dotenv import load_dotenv
+from collections import defaultdict
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -10,6 +11,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 ENV_PATH = os.path.join(BASE_DIR, ".env")
 SEEN_FILE = os.path.join(DATA_DIR, "seen_trades.json")
+ROLLING_FILE = os.path.join(DATA_DIR, "rolling_totals.json")
 
 load_dotenv(dotenv_path=ENV_PATH)
 
@@ -20,7 +22,8 @@ if not DISCORD_WEBHOOK_URL:
 
 # --- CONFIG ---
 WALLET = "0x6ac5bb06a9eb05641fd5e82640268b92f3ab4b6e"
-THRESHOLD = 7500
+SINGLE_BET_THRESHOLD = 5000
+CUMULATIVE_THRESHOLD = 17500
 CHECK_INTERVAL = 30  # seconds
 
 
@@ -42,6 +45,24 @@ def save_seen_trades(seen_trades):
         print(f"Error saving seen trades: {e}")
 
 
+def load_rolling_totals():
+    if os.path.exists(ROLLING_FILE):
+        try:
+            with open(ROLLING_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading rolling totals: {e}")
+    return {}
+
+
+def save_rolling_totals(rolling_totals):
+    try:
+        with open(ROLLING_FILE, "w", encoding="utf-8") as f:
+            json.dump(rolling_totals, f, indent=2)
+    except Exception as e:
+        print(f"Error saving rolling totals: {e}")
+
+
 def get_trade_id(trade):
     for key in ["id", "transactionHash", "txHash"]:
         value = trade.get(key)
@@ -53,7 +74,8 @@ def get_trade_id(trade):
         f"{trade.get('timestamp', '')}|"
         f"{trade.get('usdcSize', '')}|"
         f"{trade.get('title', '')}|"
-        f"{trade.get('outcome', '')}"
+        f"{trade.get('outcome', '')}|"
+        f"{trade.get('price', '')}"
     )
 
 
@@ -62,7 +84,8 @@ def get_trades():
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        return data if isinstance(data, list) else []
     except Exception as e:
         print(f"Error fetching trades: {e}")
         return []
@@ -99,11 +122,11 @@ def warmup_seen_trades():
     return seen_trades
 
 
-def check_trades(seen_trades):
+def check_trades(seen_trades, rolling_totals):
     trades = get_trades()
     if not trades:
         print("No trades found.")
-        return seen_trades
+        return seen_trades, rolling_totals
 
     new_trades = []
     for trade in trades:
@@ -117,9 +140,12 @@ def check_trades(seen_trades):
 
     if not new_trades:
         print("No new trade activity.")
-        return seen_trades
+        return seen_trades, rolling_totals
 
     print(f"New trades found: {len(new_trades)}")
+
+    batch_totals = defaultdict(float)
+    batch_info = {}
 
     for trade in new_trades:
         slug = trade.get("slug", "unknown")
@@ -144,9 +170,23 @@ def check_trades(seen_trades):
         )
         price = float(price or 0)
 
-        print(f"- {title} | {outcome}: ${usdc:,.2f} at {price:.3f}")
+        key = f"{slug}|||{outcome}"
 
-        if usdc >= THRESHOLD:
+        batch_totals[key] += usdc
+
+        if key not in batch_info:
+            batch_info[key] = {
+                "title": title,
+                "outcome": outcome,
+                "prices": [],
+            }
+
+        batch_info[key]["prices"].append(price)
+
+        print(f"- New trade: {title} | {outcome}: ${usdc:,.2f} at {price:.3f}")
+
+        # --- SINGLE BET ALERT ---
+        if usdc >= SINGLE_BET_THRESHOLD:
             msg = (
                 f"🚨 HUGE SINGLE POLYMARKET BET\n"
                 f"Market: {title}\n"
@@ -156,11 +196,55 @@ def check_trades(seen_trades):
             )
             send_discord(msg)
 
+    print("New activity this cycle:")
+    for key, total in sorted(batch_totals.items(), key=lambda x: x[1], reverse=True):
+        info = batch_info[key]
+        print(f"- {info['title']} | {info['outcome']}: ${total:,.2f}")
+
+    # --- CUMULATIVE ALERTS ---
+    for key, batch_total in batch_totals.items():
+        info = batch_info[key]
+
+        old_total = rolling_totals.get(key, {}).get("total", 0)
+        already_alerted = rolling_totals.get(key, {}).get("cumulative_alerted", False)
+
+        new_total = old_total + batch_total
+
+        rolling_totals[key] = {
+            "title": info["title"],
+            "outcome": info["outcome"],
+            "total": new_total,
+            "cumulative_alerted": already_alerted,
+        }
+
+        avg_price = sum(info["prices"]) / len(info["prices"]) if info["prices"] else 0
+
+        print(
+            f"Running total -> {info['title']} | {info['outcome']}: "
+            f"${new_total:,.2f}"
+        )
+
+        if new_total >= CUMULATIVE_THRESHOLD and not already_alerted:
+            msg = (
+                f"🚨 CUMULATIVE POLYMARKET ACTIVITY\n"
+                f"Market: {info['title']}\n"
+                f"Bet on: {info['outcome']}\n"
+                f"New this cycle: ${batch_total:,.0f}\n"
+                f"Running total: ${new_total:,.0f}\n"
+                f"Avg price paid this cycle: {avg_price:.3f}"
+            )
+            send_discord(msg)
+            rolling_totals[key]["cumulative_alerted"] = True
+
     save_seen_trades(seen_trades)
-    return seen_trades
+    save_rolling_totals(rolling_totals)
+
+    return seen_trades, rolling_totals
 
 
 def main():
+    print("HYBRID ALERT VERSION LIVE")
+
     if not os.path.exists(SEEN_FILE):
         print("First run detected. Warming up from current activity...")
         seen_trades = warmup_seen_trades()
@@ -168,11 +252,13 @@ def main():
         seen_trades = load_seen_trades()
         print(f"Loaded {len(seen_trades)} previously seen trades.")
 
+    rolling_totals = load_rolling_totals()
+    print(f"Loaded {len(rolling_totals)} rolling market/outcome totals.")
     print("Monitoring started...")
 
     while True:
         print(f"Checking... ({time.strftime('%H:%M:%S')})")
-        seen_trades = check_trades(seen_trades)
+        seen_trades, rolling_totals = check_trades(seen_trades, rolling_totals)
         time.sleep(CHECK_INTERVAL)
 
 
