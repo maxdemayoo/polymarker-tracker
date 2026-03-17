@@ -13,12 +13,12 @@ ENV_PATH = os.path.join(BASE_DIR, ".env")
 SEEN_FILE = os.path.join(DATA_DIR, "seen_trades.json")
 ROLLING_FILE = os.path.join(DATA_DIR, "rolling_totals.json")
 
-load_dotenv(dotenv_path=ENV_PATH, override=True)
+load_dotenv(dotenv_path=ENV_PATH)
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 if not DISCORD_WEBHOOK_URL:
-    raise ValueError("Missing DISCORD_WEBHOOK_URL in .env file")
+    raise ValueError("Missing DISCORD_WEBHOOK_URL environment variable")
 
 # --- CONFIG ---
 WALLET = "0x6ac5bb06a9eb05641fd5e82640268b92f3ab4b6e"
