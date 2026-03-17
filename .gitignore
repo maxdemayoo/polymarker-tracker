@@ -1,0 +1,6 @@
+.env
+.venv/
+__pycache__/
+data/
+seen_trades.json
+rolling_totals.json
