@@ -13,7 +13,7 @@ SEEN_FILE = os.path.join(DATA_DIR, "seen_trades.json")
 
 load_dotenv(dotenv_path=ENV_PATH)
 
-DISCORD_WEBHOOK_URL = os.getenv("https://discord.com/api/webhooks/1483371087525056532/C2wMzedofXgoXkQ9ehDVyTzIgMHpAweLNx8bZNqA_ISo9dwERKqk4SfVQvkdS5Id0Lad")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 if not DISCORD_WEBHOOK_URL:
     raise ValueError("Missing DISCORD_WEBHOOK_URL environment variable")
